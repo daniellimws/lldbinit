@@ -392,6 +392,7 @@ def __lldb_init_module(debugger, internal_dict):
     ci.HandleCommand("command script add -f lldbinit.cmd_vm_select_vm vmselect", res)
 
     ci.HandleCommand("command script add -f lldbinit.cmd_cov cov", res)
+    ci.HandleCommand("command script add -f lldbinit.cmd_callz cz", res)
     ci.HandleCommand("command script add -f lldbinit.cmd_xu xu", res)
 
     # add the hook - we don't need to wait for a target to be loaded
@@ -686,12 +687,16 @@ def cmd_cov(debugger, command, result, _dict):
 
     args = command.split(' ')
     if len(args) < 1:
-        print('cov <function_name>')
+        print('cov <function_name> <times>')
         return
 
     CONFIG_NO_CTX = 1
 
     func_name = args[0]
+    if len(args) == 2:
+        times = int(args[1])
+    else:
+        times = 1
     
     rip = int(str(get_frame().reg["rip"].value), 16)
 
@@ -700,6 +705,7 @@ def cmd_cov(debugger, command, result, _dict):
     res = lldb.SBCommandReturnObject()
     lldb.debugger.GetCommandInterpreter().HandleCommand("b " + func_name, res)
     print(res)
+
     lldb.debugger.GetCommandInterpreter().HandleCommand("c", res)
 
     rip = int(str(get_frame().reg["rip"].value), 16)
@@ -712,20 +718,75 @@ def cmd_cov(debugger, command, result, _dict):
     module_base = rip - xinfo["abs_offset"]
     print(module_name, hex(module_base))
 
-    with open("cov.txt", "w") as out:
-        # out.write(f"{xinfo['module_name']}+0x{xinfo['abs_offset']:x}\n")
-        # lldb.debugger.GetCommandInterpreter().HandleCommand("ni", res)
-        while True:
-            get_process().selected_thread.StepInstruction(False)
-            rip = int(str(get_frame().reg["rip"].value), 16)
-            xinfo = resolve_mem_map(cur_target, rip)
-            out.write(f"{xinfo['module_name']}+0x{xinfo['abs_offset']:x}\n")
-
-            if target_func == resolve_symbol_name(rip) and get_mnemonic(rip) == 'ret':
+    for i in range(times):
+        with open(f"covs/cov{i}.txt", "w") as out:
+            while True:
+                # out.write(f"{xinfo['module_name']}+0x{xinfo['abs_offset']:x}\n")
+                # lldb.debugger.GetCommandInterpreter().HandleCommand("ni", res)
                 get_process().selected_thread.StepInstruction(False)
-                break
+                rip = int(str(get_frame().reg["rip"].value), 16)
+                xinfo = resolve_mem_map(cur_target, rip)
+                out.write(f"{xinfo['module_name']}+0x{xinfo['abs_offset']:x}\n")
+
+                if target_func == resolve_symbol_name(rip) and get_mnemonic(rip) == 'ret':
+                    lldb.debugger.GetCommandInterpreter().HandleCommand("c", res)
+                    print(f"[+] Written to covs/cov{i}.txt")
+                    break
+            
 
     CONFIG_NO_CTX = 0
+
+
+def cmd_callz(debugger, command, result, _dict):
+    global CONFIG_NO_CTX
+    CONFIG_NO_CTX = 1
+
+    args = command.split(' ')
+    if len(args) < 1:
+        print('cov <module name>')
+        return
+
+    module_name = args[0]
+    target = debugger.GetSelectedTarget()
+    module = find_module_by_name(get_target(), module_name)
+
+    bpmap = {}
+    print("[+] Creating breakpoints for all symbols in", module_name)
+    for symbol in module:
+        sym_name = symbol.GetName()
+        if sym_name.startswith("os") or "pthread" in sym_name or "lock" in sym_name or "operator" in sym_name:
+            continue
+        address = symbol.GetStartAddress().GetLoadAddress(target)
+        bp = target.BreakpointCreateByAddress(address)
+        bp.SetOneShot(True)
+        bpmap[address] = bp
+    print("[+] Done creating breakpoints for all symbols in", module_name)
+
+    visited = []
+    while True:
+        get_process().Continue()
+
+        thread = get_thread()
+        rip = int(str(get_frame().reg["rip"].value), 16)
+
+        if rip in visited:
+            continue
+        # visited.append(rip)
+        if rip not in bpmap.keys():
+            print("[+] Dead")
+            break
+        bpmap[rip].SetEnabled(False)
+
+        print(hex(rip) + ":")
+        for i in range(2):
+            frame = thread.GetFrameAtIndex(i)
+            symbol = frame.GetSymbol()
+            module = frame.GetModule().GetFileSpec().GetFilename()
+
+            print("|" + "__" * i, module, symbol.GetName())
+
+    CONFIG_NO_CTX = 0
+
 
 def cmd_xu(debugger, command, result, _dict):
     args = command.split(' ')
