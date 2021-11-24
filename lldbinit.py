@@ -393,7 +393,10 @@ def __lldb_init_module(debugger, internal_dict):
 
     ci.HandleCommand("command script add -f lldbinit.cmd_cov cov", res)
     ci.HandleCommand("command script add -f lldbinit.cmd_callz cz", res)
+    ci.HandleCommand("command script add -f lldbinit.cmd_callz_regex czr", res)
     ci.HandleCommand("command script add -f lldbinit.cmd_xu xu", res)
+    ci.HandleCommand("command script add -f lldbinit.cmd_aa aa", res)
+    ci.HandleCommand("command script add -f lldbinit.cmd_aaa aaa", res)
 
     # add the hook - we don't need to wait for a target to be loaded
     ci.HandleCommand("target stop-hook add -o \"HandleHookStopOnTarget\"", res)
@@ -743,7 +746,7 @@ def cmd_callz(debugger, command, result, _dict):
 
     args = command.split(' ')
     if len(args) < 1:
-        print('cov <module name>')
+        print('cz <module name>')
         return
 
     module_name = args[0]
@@ -787,13 +790,66 @@ def cmd_callz(debugger, command, result, _dict):
 
     CONFIG_NO_CTX = 0
 
+def cmd_callz_regex(debugger, command, result, _dict):
+    global CONFIG_NO_CTX
+    CONFIG_NO_CTX = 1
+
+    args = command.split(' ')
+    if len(args) < 2:
+        print('czr <module> <regex>')
+        return
+
+    module_name = args[0]
+    pattern = re.compile(args[1])
+    target = debugger.GetSelectedTarget()
+    module = find_module_by_name(get_target(), module_name)
+
+    bpmap = {}
+    print("[+] Creating breakpoints for all symbols in", module_name, "with regex", args[1])
+    for symbol in module:
+        sym_name = symbol.GetName()
+        match = re.match(pattern, sym_name)
+        if not match:
+            continue
+        if sym_name.startswith("os") or "pthread" in sym_name or "lock" in sym_name or "operator" in sym_name:
+            continue
+        address = symbol.GetStartAddress().GetLoadAddress(target)
+        bp = target.BreakpointCreateByAddress(address)
+        bp.SetOneShot(True)
+        bpmap[address] = bp
+    print("[+] Done creating breakpoints for all symbols in", module_name)
+
+    visited = []
+    while True:
+        get_process().Continue()
+
+        thread = get_thread()
+        rip = int(str(get_frame().reg["rip"].value), 16)
+
+        if rip in visited:
+            continue
+        # visited.append(rip)
+        if rip not in bpmap.keys():
+            print("[+] Dead")
+            break
+        bpmap[rip].SetEnabled(False)
+
+        print(hex(rip) + ":")
+        for i in range(2):
+            frame = thread.GetFrameAtIndex(i)
+            symbol = frame.GetSymbol()
+            module = frame.GetModule().GetFileSpec().GetFilename()
+
+            print("|" + "__" * i, module, symbol.GetName())
+
+    CONFIG_NO_CTX = 0
 
 def cmd_xu(debugger, command, result, _dict):
     args = command.split(' ')
     if len(args) < 1:
         print('xu <expression>')
         return
-    
+
     addr = int(get_frame().EvaluateExpression(args[0]).GetValue(), 10)
     error = lldb.SBError()
 
@@ -813,6 +869,45 @@ def cmd_xu(debugger, command, result, _dict):
         offset += 100
 
     print(s)
+
+def cmd_aa(debugger, command, result, _dict):
+    def eee(cmd):
+        res = lldb.SBCommandReturnObject()
+        debugger.GetCommandInterpreter().HandleCommand(cmd, res)
+
+    eee("c")
+    eee("bpc 1")
+
+def cmd_aaa(debugger, command, result, _dict):
+    def eee(cmd):
+        res = lldb.SBCommandReturnObject()
+        debugger.GetCommandInterpreter().HandleCommand(cmd, res)
+
+    def reg(r):
+        return int(str(get_frame().reg[r].value), 16)
+
+    n = 1
+    args = command.split(' ')
+    if len(args) > 0:
+        n = int(args[0])
+
+    global CONFIG_NO_CTX
+    CONFIG_NO_CTX = 1
+    res = ""
+    for _ in range(n):
+        eee("c")
+        rbx = reg("rbx")
+        r14 = reg("r14")
+        val = (rbx + 0x100000000 - r14) & 0xffffffff
+        if val == 0x80000000:
+            val = 0x7fffffff
+            update_register("r14", "0xffffffff")
+        else:
+            update_register("r14", "0")
+        # print(f"{rbx:x} {r14:x} {val:x}")
+        res += f"{val:x}"
+    print(res)
+    CONFIG_NO_CTX = 0
 
 # ---------------------------
 # Breakpoint related commands
